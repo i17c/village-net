@@ -215,6 +215,7 @@ func (i *RangeIter) Next() (*net.IPNet, net.IP) {
 
 	if i.startIP == nil {
 		i.startIP = i.cur
+		i.startRange = i.rangeIdx
 	} else if i.rangeIdx == i.startRange && i.cur.Equal(i.startIP) {
 		// IF we've looped back to where we started, give up
 		return nil, nil
