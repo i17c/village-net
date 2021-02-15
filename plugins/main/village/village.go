@@ -15,6 +15,7 @@ import (
 	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
 	"os"
 	"runtime"
+	"strings"
 )
 
 var logg *bufio.Writer
@@ -55,7 +56,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return ctrl.Add()
 	}
 
-	result := &commontype.Result{}
+	result := &current.Result{}
 	r, err := ipam.ExecAdd(conf.IPAM.Type, args.StdinData)
 	if err != nil {
 		return err
@@ -94,40 +95,26 @@ func cmdAdd(args *skel.CmdArgs) error {
 		DNS:        result.DNS,
 	}
 	mvIf := &current.Result{CNIVersion: cniVersion}
-	for i := range result.Interfaces {
-		inf := result.Interfaces[i]
-		if inf.Type == "macvlan" {
-			mvIf.Interfaces = append(mvIf.Interfaces, &current.Interface{
-				Name:    inf.Name,
-				Mac:     inf.Mac,
-				Sandbox: inf.Sandbox,
-			})
-			idx := len(mvIf.Interfaces) - 1
-			for _, ipInfo := range inf.IPs {
-				mvIf.IPs = append(mvIf.IPs, &current.IPConfig{
-					Version:   ipInfo.Version,
-					Interface: &idx,
-					Address:   ipInfo.Address,
-					Gateway:   ipInfo.Gateway,
-				})
+	for _, ipInfo := range result.IPs {
+		ipBody := &current.IPConfig{
+			Version: ipInfo.Version,
+			Address: ipInfo.Address,
+			Gateway: ipInfo.Gateway,
+		}
+		if ipInfo.Interface != nil {
+			inf := result.Interfaces[*ipInfo.Interface]
+			if strings.HasPrefix(inf.Name, "mv") {
+				mvIf.Interfaces = append(mvIf.Interfaces, inf)
+				idx := len(mvIf.Interfaces) - 1
+				ipBody.Interface = &idx
+				mvIf.IPs = append(mvIf.IPs, ipBody)
+				continue
 			}
-			continue
+			brIf.Interfaces = append(brIf.Interfaces, inf)
+			idx := len(brIf.Interfaces) - 1
+			ipBody.Interface = &idx
 		}
-
-		brIf.Interfaces = append(brIf.Interfaces, &current.Interface{
-			Name:    inf.Name,
-			Mac:     inf.Mac,
-			Sandbox: inf.Sandbox,
-		})
-		idx := len(brIf.Interfaces) - 1
-		for _, ipInfo := range inf.IPs {
-			brIf.IPs = append(brIf.IPs, &current.IPConfig{
-				Version:   ipInfo.Version,
-				Interface: &idx,
-				Address:   ipInfo.Address,
-				Gateway:   ipInfo.Gateway,
-			})
-		}
+		brIf.IPs = append(brIf.IPs, ipBody)
 	}
 
 	ctrl = bridge.NewCtrl(args, conf, cniVersion, brIf)
