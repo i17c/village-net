@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"github.com/containernetworking/cni/pkg/types/current"
 	"github.com/containernetworking/cni/pkg/version"
 	"github.com/containernetworking/plugins/pkg/types"
 	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
@@ -51,7 +52,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}
 
 	// 获取 ip 并返回结果
-	r := &types.Result{}
+	r := &current.Result{}
 	r, err = ipamClient.AssignIp(args.ContainerID)
 	if err != nil {
 		log.WriteString(err.Error())

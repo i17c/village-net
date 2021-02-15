@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/containernetworking/cni/pkg/types/current"
 	"github.com/containernetworking/plugins/pkg/clients"
 	"github.com/containernetworking/plugins/pkg/types"
 	v1 "k8s.io/api/core/v1"
@@ -18,7 +19,7 @@ const ipamCMInterfaceKey = "interfaces"
 const ipamCMContainerIpKey = "containerIps"
 
 type Interface interface {
-	AssignIp(containerId string) (*types.Result, error)
+	AssignIp(containerId string) (*current.Result, error)
 	DeleteIp(containerId string) error
 	Check(containerId string) (bool, error)
 }
@@ -46,7 +47,7 @@ func NewIPAMClient(conf types.NetConf) (Interface, error) {
 	return &client{kubeClient: kubeClient}, nil
 }
 
-func (i *client) AssignIp(containerId string) (*types.Result, error) {
+func (i *client) AssignIp(containerId string) (*current.Result, error) {
 	// 从 apiserver 中读取 cm
 	cm, err := i.kubeClient.CoreV1().ConfigMaps(ipamConfigMapNamespace).Get(context.TODO(), ipamConfigMap, metav1.GetOptions{})
 	if err != nil {
@@ -54,7 +55,7 @@ func (i *client) AssignIp(containerId string) (*types.Result, error) {
 	}
 	log.WriteString(cm.String() + "\n")
 
-	result := types.Result{}
+	result := current.Result{}
 	interfaces := ifConfigs{}
 	if err := json.Unmarshal([]byte(cm.Data[ipamCMInterfaceKey]), &interfaces); err != nil {
 		return nil, fmt.Errorf("failed to marshal interfaces: %v", err)
@@ -67,11 +68,10 @@ func (i *client) AssignIp(containerId string) (*types.Result, error) {
 	if err := json.Unmarshal([]byte(cm.Data[ipamCMContainerIpKey]), &cnIpMap); err != nil {
 		return nil, fmt.Errorf("failed to marshal containerIps: %v", err)
 	}
-	for _, dev := range interfaces {
-		curIf := types.Interface{}
-		curIp := types.IPConfig{}
-		curIf.IsDefaultGW = dev.IsDefaultGW
-		curIf.Type = dev.Type
+	for i, dev := range interfaces {
+		curIf := current.Interface{}
+		curIp := current.IPConfig{}
+		curIp.Interface = &i
 		curIf.Name = dev.Name
 		// 从 cm 中找到可用的 ip
 		ip, ipnet, err := net.ParseCIDR(dev.Range)
@@ -95,7 +95,6 @@ func (i *client) AssignIp(containerId string) (*types.Result, error) {
 		}
 		curIp.Version = version
 		curIp.Gateway = net.ParseIP(dev.GateWay)
-		curIf.IPs = append(curIf.IPs, &curIp)
 		result.IPs = append(result.IPs, &curIp)
 		result.Interfaces = append(result.Interfaces, &curIf)
 
@@ -111,7 +110,7 @@ func (i *client) AssignIp(containerId string) (*types.Result, error) {
 	}
 
 	// 返回 ip
-	log.WriteString("result in client:\n")
+	log.WriteString("result in ipam client:\n")
 	if l, err := json.Marshal(result); err != nil {
 		log.WriteString(err.Error())
 	} else {
