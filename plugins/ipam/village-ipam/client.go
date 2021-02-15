@@ -33,10 +33,8 @@ type ifConfigs []ifConfig
 
 type ifConfig struct {
 	Name        string `json:"name"`
-	Type        string `json:"type,omitempty"`
 	Range       string `json:"range,omitempty"`
 	GateWay     string `json:"gateway,omitempty"`
-	IsDefaultGW bool   `json:"is_default_gw,omitempty"`
 }
 
 func NewIPAMClient(conf types.NetConf) (Interface, error) {
