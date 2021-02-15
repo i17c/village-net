@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -12,8 +13,11 @@ import (
 	"github.com/containernetworking/plugins/pkg/macvlan"
 	commontype "github.com/containernetworking/plugins/pkg/types"
 	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
+	"os"
 	"runtime"
 )
+
+var logg *bufio.Writer
 
 func init() {
 	// this ensures that main runs only on main thread (thread group leader).
@@ -37,6 +41,7 @@ func loadConf(data []byte) (*commontype.NetConf, string, error) {
 }
 
 func cmdAdd(args *skel.CmdArgs) error {
+	logg.WriteString("now I am in village plugin\n")
 	conf, cniVersion, err := loadConf(args.StdinData)
 	if err != nil {
 		return err
@@ -55,6 +60,13 @@ func cmdAdd(args *skel.CmdArgs) error {
 	if err != nil {
 		return err
 	}
+	logg.WriteString("result from ipam exec:\n")
+	if l, err := json.Marshal(r); err != nil {
+		logg.WriteString(err.Error())
+	} else {
+		logg.Write(l)
+		logg.WriteString("\n")
+	}
 	defer func() {
 		if !success {
 			_ = ipam.ExecDel(conf.IPAM.Type, args.StdinData)
@@ -69,6 +81,13 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("load village ipam result failed: %s", err.Error())
 	}
 
+	logg.WriteString("result from result marshal:\n")
+	if l, err := json.Marshal(result); err != nil {
+		logg.WriteString(err.Error())
+	} else {
+		logg.Write(l)
+		logg.WriteString("\n")
+	}
 	brIf := &current.Result{
 		CNIVersion: cniVersion,
 		Routes:     result.Routes,
@@ -100,7 +119,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 			Mac:     inf.Mac,
 			Sandbox: inf.Sandbox,
 		})
-		idx := len(mvIf.Interfaces) - 1
+		idx := len(brIf.Interfaces) - 1
 		for _, ipInfo := range inf.IPs {
 			brIf.IPs = append(brIf.IPs, &current.IPConfig{
 				Version:   ipInfo.Version,
@@ -123,6 +142,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}()
 
 	if len(mvIf.Interfaces) > 0 && conf.MacVlan != nil {
+		args.IfName = "mv0"
 		mvCtrl := macvlan.NewCtrl(args, conf, cniVersion, mvIf)
 		if err := mvCtrl.Add(); err != nil {
 			return err
@@ -147,8 +167,11 @@ func cmdDel(args *skel.CmdArgs) error {
 
 	// FIXME
 	func() {
+		old := args.IfName
+		args.IfName = "mv0"
 		mvCtrl := macvlan.NewCtrl(args, conf, cniVersion, nil)
 		_ = mvCtrl.Del()
+		args.IfName = old
 	}()
 
 	ctrl := bridge.NewCtrl(args, conf, cniVersion, nil)
@@ -160,6 +183,7 @@ func cmdDel(args *skel.CmdArgs) error {
 }
 
 func cmdCheck(args *skel.CmdArgs) error {
+	logg.WriteString("now I am in village plugin check\n")
 	conf, cniVersion, err := loadConf(args.StdinData)
 	if err != nil {
 		return err
@@ -186,5 +210,15 @@ func cmdCheck(args *skel.CmdArgs) error {
 }
 
 func main() {
+	file, err := os.OpenFile("/tmp/main.log", os.O_CREATE|os.O_APPEND|os.O_RDWR, 0655)
+	if err != nil {
+		panic(err)
+	}
+	logg = bufio.NewWriter(file)
+	defer func() {
+		logg.Flush()
+		file.Sync()
+		file.Close()
+	}()
 	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, bv.BuildString("village"))
 }

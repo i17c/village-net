@@ -52,6 +52,7 @@ func (i *client) AssignIp(containerId string) (*types.Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get cm: %v", err)
 	}
+	log.WriteString(cm.String() + "\n")
 
 	result := types.Result{}
 	interfaces := ifConfigs{}
@@ -78,11 +79,13 @@ func (i *client) AssignIp(containerId string) (*types.Result, error) {
 			return nil, err
 		}
 
+		log.WriteString("select ip \n")
 		for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); inc(ip) {
 			// 在 cm 中检查该 ip 是否被占用
 			_, ok := cnIpMap[ip.String()]
 			if !ok {
 				curIp.Address = net.IPNet{IP: ip, Mask: ipnet.Mask}
+				log.WriteString(fmt.Sprintf("ip: %v\n", ip))
 				break
 			}
 		}
@@ -108,6 +111,13 @@ func (i *client) AssignIp(containerId string) (*types.Result, error) {
 	}
 
 	// 返回 ip
+	log.WriteString("result in client:\n")
+	if l, err := json.Marshal(result); err != nil {
+		log.WriteString(err.Error())
+	} else {
+		log.Write(l)
+		log.WriteString("\n")
+	}
 	return &result, nil
 }
 
