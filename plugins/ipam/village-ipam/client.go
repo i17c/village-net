@@ -39,7 +39,7 @@ type ifConfig struct {
 }
 
 func NewIPAMClient(conf types.NetConf) (Interface, error) {
-	kubeClient, err := clients.NewKubeClient(conf.Kubernetes.Kubeconfig)
+	kubeClient, err := clients.NewKubeClient(conf.Cluster.Kubeconfig)
 	if err != nil {
 		return nil, err
 	}

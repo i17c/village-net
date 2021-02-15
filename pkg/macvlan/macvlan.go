@@ -12,27 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package macvlan
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"net"
-	"runtime"
-
-	"github.com/j-keck/arping"
 	"github.com/vishvananda/netlink"
+	"net"
 
-	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	"github.com/containernetworking/cni/pkg/types/current"
-	"github.com/containernetworking/cni/pkg/version"
-
 	"github.com/containernetworking/plugins/pkg/ip"
-	"github.com/containernetworking/plugins/pkg/ipam"
 	"github.com/containernetworking/plugins/pkg/ns"
-	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
+	commontype "github.com/containernetworking/plugins/pkg/types"
 	"github.com/containernetworking/plugins/pkg/utils/sysctl"
 )
 
@@ -58,13 +50,6 @@ type MacEnvArgs struct {
 	MAC types.UnmarshallableString `json:"mac,omitempty"`
 }
 
-func init() {
-	// this ensures that main runs only on main thread (thread group leader).
-	// since namespace ops (unshare, setns) are done for a single thread, we
-	// must ensure that the goroutine does not jump from OS thread to thread
-	runtime.LockOSThread()
-}
-
 func getDefaultRouteInterfaceName() (string, error) {
 	routeToDstIP, err := netlink.RouteList(nil, netlink.FAMILY_ALL)
 	if err != nil {
@@ -84,6 +69,7 @@ func getDefaultRouteInterfaceName() (string, error) {
 	return "", fmt.Errorf("no default route interface found")
 }
 
+// TODO: del
 func loadConf(bytes []byte, envArgs string) (*NetConf, string, error) {
 	n := &NetConf{}
 	if err := json.Unmarshal(bytes, n); err != nil {
@@ -163,7 +149,7 @@ func modeToString(mode netlink.MacvlanMode) (string, error) {
 	}
 }
 
-func createMacvlan(conf *NetConf, ifName string, netns ns.NetNS) (*current.Interface, error) {
+func createMacvlan(conf *commontype.MacVlanConf, ifName string, netns ns.NetNS) (*current.Interface, error) {
 	macvlan := &current.Interface{}
 
 	mode, err := modeFromString(conf.Mode)
@@ -238,234 +224,6 @@ func createMacvlan(conf *NetConf, ifName string, netns ns.NetNS) (*current.Inter
 	}
 
 	return macvlan, nil
-}
-
-func cmdAdd(args *skel.CmdArgs) error {
-	n, cniVersion, err := loadConf(args.StdinData, args.Args)
-	if err != nil {
-		return err
-	}
-
-	isLayer3 := n.IPAM.Type != ""
-
-	netns, err := ns.GetNS(args.Netns)
-	if err != nil {
-		return fmt.Errorf("failed to open netns %q: %v", netns, err)
-	}
-	defer netns.Close()
-
-	macvlanInterface, err := createMacvlan(n, args.IfName, netns)
-	if err != nil {
-		return err
-	}
-
-	// Delete link if err to avoid link leak in this ns
-	defer func() {
-		if err != nil {
-			netns.Do(func(_ ns.NetNS) error {
-				return ip.DelLinkByName(args.IfName)
-			})
-		}
-	}()
-
-	// Assume L2 interface only
-	result := &current.Result{CNIVersion: cniVersion, Interfaces: []*current.Interface{macvlanInterface}}
-
-	if isLayer3 {
-		// run the IPAM plugin and get back the config to apply
-		r, err := ipam.ExecAdd(n.IPAM.Type, args.StdinData)
-		if err != nil {
-			return err
-		}
-
-		// Invoke ipam del if err to avoid ip leak
-		defer func() {
-			if err != nil {
-				ipam.ExecDel(n.IPAM.Type, args.StdinData)
-			}
-		}()
-
-		// Convert whatever the IPAM result was into the current Result type
-		ipamResult, err := current.NewResultFromResult(r)
-		if err != nil {
-			return err
-		}
-
-		if len(ipamResult.IPs) == 0 {
-			return errors.New("IPAM plugin returned missing IP config")
-		}
-
-		result.IPs = ipamResult.IPs
-		result.Routes = ipamResult.Routes
-
-		for _, ipc := range result.IPs {
-			// All addresses apply to the container macvlan interface
-			ipc.Interface = current.Int(0)
-		}
-
-		err = netns.Do(func(_ ns.NetNS) error {
-			if err := ipam.ConfigureIface(args.IfName, result); err != nil {
-				return err
-			}
-
-			contVeth, err := net.InterfaceByName(args.IfName)
-			if err != nil {
-				return fmt.Errorf("failed to look up %q: %v", args.IfName, err)
-			}
-
-			for _, ipc := range result.IPs {
-				if ipc.Version == "4" {
-					_ = arping.GratuitousArpOverIface(ipc.Address.IP, *contVeth)
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-	} else {
-		// For L2 just change interface status to up
-		err = netns.Do(func(_ ns.NetNS) error {
-			macvlanInterfaceLink, err := netlink.LinkByName(args.IfName)
-			if err != nil {
-				return fmt.Errorf("failed to find interface name %q: %v", macvlanInterface.Name, err)
-			}
-
-			if err := netlink.LinkSetUp(macvlanInterfaceLink); err != nil {
-				return fmt.Errorf("failed to set %q UP: %v", args.IfName, err)
-			}
-
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-	}
-
-	result.DNS = n.DNS
-
-	return types.PrintResult(result, cniVersion)
-}
-
-func cmdDel(args *skel.CmdArgs) error {
-	n, _, err := loadConf(args.StdinData, args.Args)
-	if err != nil {
-		return err
-	}
-
-	isLayer3 := n.IPAM.Type != ""
-
-	if isLayer3 {
-		err = ipam.ExecDel(n.IPAM.Type, args.StdinData)
-		if err != nil {
-			return err
-		}
-	}
-
-	if args.Netns == "" {
-		return nil
-	}
-
-	// There is a netns so try to clean up. Delete can be called multiple times
-	// so don't return an error if the device is already removed.
-	err = ns.WithNetNSPath(args.Netns, func(_ ns.NetNS) error {
-		if err := ip.DelLinkByName(args.IfName); err != nil {
-			if err != ip.ErrLinkNotFound {
-				return err
-			}
-		}
-		return nil
-	})
-
-	return err
-}
-
-func main() {
-	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, bv.BuildString("macvlan"))
-}
-
-func cmdCheck(args *skel.CmdArgs) error {
-
-	n, _, err := loadConf(args.StdinData, args.Args)
-	if err != nil {
-		return err
-	}
-	isLayer3 := n.IPAM.Type != ""
-
-	netns, err := ns.GetNS(args.Netns)
-	if err != nil {
-		return fmt.Errorf("failed to open netns %q: %v", args.Netns, err)
-	}
-	defer netns.Close()
-
-	if isLayer3 {
-		// run the IPAM plugin and get back the config to apply
-		err = ipam.ExecCheck(n.IPAM.Type, args.StdinData)
-		if err != nil {
-			return err
-		}
-	}
-
-	// Parse previous result.
-	if n.NetConf.RawPrevResult == nil {
-		return fmt.Errorf("Required prevResult missing")
-	}
-
-	if err := version.ParsePrevResult(&n.NetConf); err != nil {
-		return err
-	}
-
-	result, err := current.NewResultFromResult(n.PrevResult)
-	if err != nil {
-		return err
-	}
-
-	var contMap current.Interface
-	// Find interfaces for names whe know, macvlan device name inside container
-	for _, intf := range result.Interfaces {
-		if args.IfName == intf.Name {
-			if args.Netns == intf.Sandbox {
-				contMap = *intf
-				continue
-			}
-		}
-	}
-
-	// The namespace must be the same as what was configured
-	if args.Netns != contMap.Sandbox {
-		return fmt.Errorf("Sandbox in prevResult %s doesn't match configured netns: %s",
-			contMap.Sandbox, args.Netns)
-	}
-
-	m, err := netlink.LinkByName(n.Master)
-	if err != nil {
-		return fmt.Errorf("failed to lookup master %q: %v", n.Master, err)
-	}
-
-	// Check prevResults for ips, routes and dns against values found in the container
-	if err := netns.Do(func(_ ns.NetNS) error {
-
-		// Check interface against values found in the container
-		err := validateCniContainerInterface(contMap, m.Attrs().Index, n.Mode)
-		if err != nil {
-			return err
-		}
-
-		err = ip.ValidateExpectedInterfaceIPs(args.IfName, result.IPs)
-		if err != nil {
-			return err
-		}
-
-		err = ip.ValidateExpectedRoute(result.Routes)
-		if err != nil {
-			return err
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-
-	return nil
 }
 
 func validateCniContainerInterface(intf current.Interface, parentIndex int, modeExpected string) error {

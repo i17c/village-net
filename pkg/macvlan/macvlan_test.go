@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package macvlan
 
 import (
 	"encoding/json"
 	"fmt"
+	commontype "github.com/containernetworking/plugins/pkg/types"
 	"net"
 	"syscall"
 
@@ -127,15 +128,10 @@ var _ = Describe("macvlan Operations", func() {
 	})
 
 	It("creates an macvlan link in a non-default namespace", func() {
-		conf := &NetConf{
-			NetConf: types.NetConf{
-				CNIVersion: "0.3.1",
-				Name:       "testConfig",
-				Type:       "macvlan",
-			},
+		conf := &commontype.MacVlanConf{
 			Master: MASTER_NAME,
 			Mode:   "bridge",
-			MTU:    1500,
+			MTU:  1500,
 		}
 
 		targetNs, err := testutils.NewNS()

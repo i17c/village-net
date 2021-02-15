@@ -1,5 +1,5 @@
 package types
 
-type Kubernetes struct {
+type Cluster struct {
 	Kubeconfig string `json:"kubeconfig"`
 }

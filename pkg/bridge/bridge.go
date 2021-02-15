@@ -12,30 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package bridge
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
+	commontype "github.com/containernetworking/plugins/pkg/types"
+	"github.com/vishvananda/netlink"
 	"io/ioutil"
 	"net"
-	"runtime"
 	"syscall"
-	"time"
 
-	"github.com/j-keck/arping"
-	"github.com/vishvananda/netlink"
-
-	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	"github.com/containernetworking/cni/pkg/types/current"
-	"github.com/containernetworking/cni/pkg/version"
 	"github.com/containernetworking/plugins/pkg/ip"
-	"github.com/containernetworking/plugins/pkg/ipam"
 	"github.com/containernetworking/plugins/pkg/ns"
-	"github.com/containernetworking/plugins/pkg/utils"
-	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
 	"github.com/containernetworking/plugins/pkg/utils/sysctl"
 )
 
@@ -63,13 +54,6 @@ type gwInfo struct {
 	defaultRouteFound bool
 }
 
-func init() {
-	// this ensures that main runs only on main thread (thread group leader).
-	// since namespace ops (unshare, setns) are done for a single thread, we
-	// must ensure that the goroutine does not jump from OS thread to thread
-	runtime.LockOSThread()
-}
-
 func loadNetConf(bytes []byte) (*NetConf, string, error) {
 	n := &NetConf{
 		BrName: defaultBrName,
@@ -87,7 +71,7 @@ func loadNetConf(bytes []byte) (*NetConf, string, error) {
 // following for each IP family:
 //    - Calculates and compiles a list of gateway addresses
 //    - Adds a default route if needed
-func calcGateways(result *current.Result, n *NetConf) (*gwInfo, *gwInfo, error) {
+func calcGateways(result *current.Result, n *commontype.NetConf) (*gwInfo, *gwInfo, error) {
 
 	gwsV4 := &gwInfo{}
 	gwsV6 := &gwInfo{}
@@ -339,7 +323,7 @@ func calcGatewayIP(ipn *net.IPNet) net.IP {
 	return ip.NextIP(nid)
 }
 
-func setupBridge(n *NetConf) (*netlink.Bridge, *current.Interface, error) {
+func setupBridge(n *commontype.NetConf) (*netlink.Bridge, *current.Interface, error) {
 	vlanFiltering := false
 	if n.Vlan != 0 {
 		vlanFiltering = true
@@ -377,258 +361,6 @@ func enableIPForward(family int) error {
 	return ip.EnableIP6Forward()
 }
 
-func cmdAdd(args *skel.CmdArgs) error {
-	var success bool = false
-
-	n, cniVersion, err := loadNetConf(args.StdinData)
-	if err != nil {
-		return err
-	}
-
-	isLayer3 := n.IPAM.Type != ""
-
-	if n.IsDefaultGW {
-		n.IsGW = true
-	}
-
-	if n.HairpinMode && n.PromiscMode {
-		return fmt.Errorf("cannot set hairpin mode and promiscous mode at the same time.")
-	}
-
-	br, brInterface, err := setupBridge(n)
-	if err != nil {
-		return err
-	}
-
-	netns, err := ns.GetNS(args.Netns)
-	if err != nil {
-		return fmt.Errorf("failed to open netns %q: %v", args.Netns, err)
-	}
-	defer netns.Close()
-
-	hostInterface, containerInterface, err := setupVeth(netns, br, args.IfName, n.MTU, n.HairpinMode, n.Vlan)
-	if err != nil {
-		return err
-	}
-
-	// Assume L2 interface only
-	result := &current.Result{CNIVersion: cniVersion, Interfaces: []*current.Interface{brInterface, hostInterface, containerInterface}}
-
-	if isLayer3 {
-		// run the IPAM plugin and get back the config to apply
-		r, err := ipam.ExecAdd(n.IPAM.Type, args.StdinData)
-		if err != nil {
-			return err
-		}
-
-		// release IP in case of failure
-		defer func() {
-			if !success {
-				ipam.ExecDel(n.IPAM.Type, args.StdinData)
-			}
-		}()
-
-		// Convert whatever the IPAM result was into the current Result type
-		ipamResult, err := current.NewResultFromResult(r)
-		if err != nil {
-			return err
-		}
-
-		result.IPs = ipamResult.IPs
-		result.Routes = ipamResult.Routes
-
-		if len(result.IPs) == 0 {
-			return errors.New("IPAM plugin returned missing IP config")
-		}
-
-		// Gather gateway information for each IP family
-		gwsV4, gwsV6, err := calcGateways(result, n)
-		if err != nil {
-			return err
-		}
-
-		// Configure the container hardware address and IP address(es)
-		if err := netns.Do(func(_ ns.NetNS) error {
-			// Disable IPv6 DAD just in case hairpin mode is enabled on the
-			// bridge. Hairpin mode causes echos of neighbor solicitation
-			// packets, which causes DAD failures.
-			for _, ipc := range result.IPs {
-				if ipc.Version == "6" && (n.HairpinMode || n.PromiscMode) {
-					if err := disableIPV6DAD(args.IfName); err != nil {
-						return err
-					}
-					break
-				}
-			}
-
-			// Add the IP to the interface
-			if err := ipam.ConfigureIface(args.IfName, result); err != nil {
-				return err
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
-
-		// check bridge port state
-		retries := []int{0, 50, 500, 1000, 1000}
-		for idx, sleep := range retries {
-			time.Sleep(time.Duration(sleep) * time.Millisecond)
-
-			hostVeth, err := netlink.LinkByName(hostInterface.Name)
-			if err != nil {
-				return err
-			}
-			if hostVeth.Attrs().OperState == netlink.OperUp {
-				break
-			}
-
-			if idx == len(retries)-1 {
-				return fmt.Errorf("bridge port in error state: %s", hostVeth.Attrs().OperState)
-			}
-		}
-
-		// Send a gratuitous arp
-		if err := netns.Do(func(_ ns.NetNS) error {
-			contVeth, err := net.InterfaceByName(args.IfName)
-			if err != nil {
-				return err
-			}
-
-			for _, ipc := range result.IPs {
-				if ipc.Version == "4" {
-					_ = arping.GratuitousArpOverIface(ipc.Address.IP, *contVeth)
-				}
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
-
-		if n.IsGW {
-			var firstV4Addr net.IP
-			var vlanInterface *current.Interface
-			// Set the IP address(es) on the bridge and enable forwarding
-			for _, gws := range []*gwInfo{gwsV4, gwsV6} {
-				for _, gw := range gws.gws {
-					if gw.IP.To4() != nil && firstV4Addr == nil {
-						firstV4Addr = gw.IP
-					}
-					if n.Vlan != 0 {
-						vlanIface, err := ensureVlanInterface(br, n.Vlan)
-						if err != nil {
-							return fmt.Errorf("failed to create vlan interface: %v", err)
-						}
-
-						if vlanInterface == nil {
-							vlanInterface = &current.Interface{Name: vlanIface.Attrs().Name,
-								Mac: vlanIface.Attrs().HardwareAddr.String()}
-							result.Interfaces = append(result.Interfaces, vlanInterface)
-						}
-
-						err = ensureAddr(vlanIface, gws.family, &gw, n.ForceAddress)
-						if err != nil {
-							return fmt.Errorf("failed to set vlan interface for bridge with addr: %v", err)
-						}
-					} else {
-						err = ensureAddr(br, gws.family, &gw, n.ForceAddress)
-						if err != nil {
-							return fmt.Errorf("failed to set bridge addr: %v", err)
-						}
-					}
-				}
-
-				if gws.gws != nil {
-					if err = enableIPForward(gws.family); err != nil {
-						return fmt.Errorf("failed to enable forwarding: %v", err)
-					}
-				}
-			}
-		}
-
-		if n.IPMasq {
-			chain := utils.FormatChainName(n.Name, args.ContainerID)
-			comment := utils.FormatComment(n.Name, args.ContainerID)
-			for _, ipc := range result.IPs {
-				if err = ip.SetupIPMasq(&ipc.Address, chain, comment); err != nil {
-					return err
-				}
-			}
-		}
-	}
-
-	// Refetch the bridge since its MAC address may change when the first
-	// veth is added or after its IP address is set
-	br, err = bridgeByName(n.BrName)
-	if err != nil {
-		return err
-	}
-	brInterface.Mac = br.Attrs().HardwareAddr.String()
-
-	result.DNS = n.DNS
-
-	// Return an error requested by testcases, if any
-	if debugPostIPAMError != nil {
-		return debugPostIPAMError
-	}
-
-	success = true
-
-	return types.PrintResult(result, cniVersion)
-}
-
-func cmdDel(args *skel.CmdArgs) error {
-	n, _, err := loadNetConf(args.StdinData)
-	if err != nil {
-		return err
-	}
-
-	isLayer3 := n.IPAM.Type != ""
-
-	if isLayer3 {
-		if err := ipam.ExecDel(n.IPAM.Type, args.StdinData); err != nil {
-			return err
-		}
-	}
-
-	if args.Netns == "" {
-		return nil
-	}
-
-	// There is a netns so try to clean up. Delete can be called multiple times
-	// so don't return an error if the device is already removed.
-	// If the device isn't there then don't try to clean up IP masq either.
-	var ipnets []*net.IPNet
-	err = ns.WithNetNSPath(args.Netns, func(_ ns.NetNS) error {
-		var err error
-		ipnets, err = ip.DelLinkByNameAddr(args.IfName)
-		if err != nil && err == ip.ErrLinkNotFound {
-			return nil
-		}
-		return err
-	})
-
-	if err != nil {
-		return err
-	}
-
-	if isLayer3 && n.IPMasq {
-		chain := utils.FormatChainName(n.Name, args.ContainerID)
-		comment := utils.FormatComment(n.Name, args.ContainerID)
-		for _, ipn := range ipnets {
-			if err := ip.TeardownIPMasq(ipn, chain, comment); err != nil {
-				return err
-			}
-		}
-	}
-
-	return err
-}
-
-func main() {
-	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, bv.BuildString("bridge"))
-}
-
 type cniBridgeIf struct {
 	Name        string
 	ifIndex     int
@@ -662,7 +394,7 @@ func validateInterface(intf current.Interface, expectInSb bool) (cniBridgeIf, ne
 	return ifFound, link, err
 }
 
-func validateCniBrInterface(intf current.Interface, n *NetConf) (cniBridgeIf, error) {
+func validateCniBrInterface(intf current.Interface, n *commontype.NetConf) (cniBridgeIf, error) {
 
 	brFound, link, err := validateInterface(intf, false)
 	if err != nil {
@@ -765,130 +497,4 @@ func validateCniContainerInterface(intf current.Interface) (cniBridgeIf, error) 
 	vethFound.Name = link.Attrs().Name
 
 	return vethFound, nil
-}
-
-func cmdCheck(args *skel.CmdArgs) error {
-
-	n, _, err := loadNetConf(args.StdinData)
-	if err != nil {
-		return err
-	}
-	netns, err := ns.GetNS(args.Netns)
-	if err != nil {
-		return fmt.Errorf("failed to open netns %q: %v", args.Netns, err)
-	}
-	defer netns.Close()
-
-	// run the IPAM plugin and get back the config to apply
-	err = ipam.ExecCheck(n.IPAM.Type, args.StdinData)
-	if err != nil {
-		return err
-	}
-
-	// Parse previous result.
-	if n.NetConf.RawPrevResult == nil {
-		return fmt.Errorf("Required prevResult missing")
-	}
-
-	if err := version.ParsePrevResult(&n.NetConf); err != nil {
-		return err
-	}
-
-	result, err := current.NewResultFromResult(n.PrevResult)
-	if err != nil {
-		return err
-	}
-
-	var errLink error
-	var contCNI, vethCNI cniBridgeIf
-	var brMap, contMap current.Interface
-
-	// Find interfaces for names whe know, CNI Bridge and container
-	for _, intf := range result.Interfaces {
-		if n.BrName == intf.Name {
-			brMap = *intf
-			continue
-		} else if args.IfName == intf.Name {
-			if args.Netns == intf.Sandbox {
-				contMap = *intf
-				continue
-			}
-		}
-	}
-
-	brCNI, err := validateCniBrInterface(brMap, n)
-	if err != nil {
-		return err
-	}
-
-	// The namespace must be the same as what was configured
-	if args.Netns != contMap.Sandbox {
-		return fmt.Errorf("Sandbox in prevResult %s doesn't match configured netns: %s",
-			contMap.Sandbox, args.Netns)
-	}
-
-	// Check interface against values found in the container
-	if err := netns.Do(func(_ ns.NetNS) error {
-		contCNI, errLink = validateCniContainerInterface(contMap)
-		if errLink != nil {
-			return errLink
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-
-	// Now look for veth that is peer with container interface.
-	// Anything else wasn't created by CNI, skip it
-	for _, intf := range result.Interfaces {
-		// Skip this result if name is the same as cni bridge
-		// It's either the cni bridge we dealt with above, or something with the
-		// same name in a different namespace.  We just skip since it's not ours
-		if brMap.Name == intf.Name {
-			continue
-		}
-
-		// same here for container name
-		if contMap.Name == intf.Name {
-			continue
-		}
-
-		vethCNI, errLink = validateCniVethInterface(intf, brCNI, contCNI)
-		if errLink != nil {
-			return errLink
-		}
-
-		if vethCNI.found {
-			// veth with container interface as peer and bridge as master found
-			break
-		}
-	}
-
-	if !brCNI.found {
-		return fmt.Errorf("CNI created bridge %s in host namespace was not found", n.BrName)
-	}
-	if !contCNI.found {
-		return fmt.Errorf("CNI created interface in container %s not found", args.IfName)
-	}
-	if !vethCNI.found {
-		return fmt.Errorf("CNI veth created for bridge %s was not found", n.BrName)
-	}
-
-	// Check prevResults for ips, routes and dns against values found in the container
-	if err := netns.Do(func(_ ns.NetNS) error {
-		err = ip.ValidateExpectedInterfaceIPs(args.IfName, result.IPs)
-		if err != nil {
-			return err
-		}
-
-		err = ip.ValidateExpectedRoute(result.Routes)
-		if err != nil {
-			return err
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-
-	return nil
 }

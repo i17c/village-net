@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package bridge
 
 import (
 	"encoding/json"
 	"fmt"
+	commontype "github.com/containernetworking/plugins/pkg/types"
 	"io/ioutil"
 	"net"
 	"os"
@@ -82,8 +83,8 @@ type rangeInfo struct {
 }
 
 // netConf() creates a NetConf structure for a test case.
-func (tc testCase) netConf() *NetConf {
-	return &NetConf{
+func (tc testCase) netConf() *commontype.NetConf {
+	return &commontype.NetConf{
 		NetConf: types.NetConf{
 			CNIVersion: tc.cniVersion,
 			Name:       "testConfig",
@@ -1484,7 +1485,7 @@ var _ = Describe("bridge Operations", func() {
 		const EXPECTED_IP = "10.0.0.0/8"
 		const CHANGED_EXPECTED_IP = "10.1.2.3/16"
 
-		conf := &NetConf{
+		conf := &commontype.NetConf{
 			NetConf: types.NetConf{
 				CNIVersion: "0.3.1",
 				Name:       "testConfig",
