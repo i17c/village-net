@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"github.com/containernetworking/cni/pkg/skel"
@@ -13,12 +11,9 @@ import (
 	"github.com/containernetworking/plugins/pkg/macvlan"
 	commontype "github.com/containernetworking/plugins/pkg/types"
 	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
-	"os"
 	"runtime"
 	"strings"
 )
-
-var logg *bufio.Writer
 
 func init() {
 	// this ensures that main runs only on main thread (thread group leader).
@@ -42,7 +37,6 @@ func loadConf(data []byte) (*commontype.NetConf, string, error) {
 }
 
 func cmdAdd(args *skel.CmdArgs) error {
-	logg.WriteString("now I am in village plugin\n")
 	conf, cniVersion, err := loadConf(args.StdinData)
 	if err != nil {
 		return err
@@ -61,34 +55,17 @@ func cmdAdd(args *skel.CmdArgs) error {
 	if err != nil {
 		return err
 	}
-	logg.WriteString("result from ipam exec:\n")
-	if l, err := json.Marshal(r); err != nil {
-		logg.WriteString(err.Error())
-	} else {
-		logg.Write(l)
-		logg.WriteString("\n")
-	}
 	defer func() {
 		if !success {
 			_ = ipam.ExecDel(conf.IPAM.Type, args.StdinData)
 		}
 	}()
 
-	buf := &bytes.Buffer{}
-	if err := r.PrintTo(buf); err != nil {
-		return fmt.Errorf("load ipam raw data failed: %s", err.Error())
-	}
-	if err := json.NewEncoder(buf).Encode(result); err != nil {
-		return fmt.Errorf("load village ipam result failed: %s", err.Error())
+	result, err = current.NewResultFromResult(r)
+	if err != nil {
+		return err
 	}
 
-	logg.WriteString("result from result marshal:\n")
-	if l, err := json.Marshal(result); err != nil {
-		logg.WriteString(err.Error())
-	} else {
-		logg.Write(l)
-		logg.WriteString("\n")
-	}
 	brIf := &current.Result{
 		CNIVersion: cniVersion,
 		Routes:     result.Routes,
@@ -170,7 +147,6 @@ func cmdDel(args *skel.CmdArgs) error {
 }
 
 func cmdCheck(args *skel.CmdArgs) error {
-	logg.WriteString("now I am in village plugin check\n")
 	conf, cniVersion, err := loadConf(args.StdinData)
 	if err != nil {
 		return err
@@ -197,15 +173,5 @@ func cmdCheck(args *skel.CmdArgs) error {
 }
 
 func main() {
-	file, err := os.OpenFile("/tmp/main.log", os.O_CREATE|os.O_APPEND|os.O_RDWR, 0655)
-	if err != nil {
-		panic(err)
-	}
-	logg = bufio.NewWriter(file)
-	defer func() {
-		logg.Flush()
-		file.Sync()
-		file.Close()
-	}()
 	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, bv.BuildString("village"))
 }

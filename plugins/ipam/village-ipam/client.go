@@ -32,9 +32,9 @@ type client struct {
 type ifConfigs []ifConfig
 
 type ifConfig struct {
-	Name        string `json:"name"`
-	Range       string `json:"range,omitempty"`
-	GateWay     string `json:"gateway,omitempty"`
+	Name    string `json:"name"`
+	Range   string `json:"range,omitempty"`
+	GateWay string `json:"gateway,omitempty"`
 }
 
 func NewIPAMClient(conf types.NetConf) (Interface, error) {
@@ -51,7 +51,6 @@ func (i *client) AssignIp(containerId string) (*current.Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get cm: %v", err)
 	}
-	log.WriteString(cm.String() + "\n")
 
 	result := current.Result{}
 	interfaces := ifConfigs{}
@@ -69,7 +68,8 @@ func (i *client) AssignIp(containerId string) (*current.Result, error) {
 	for i, dev := range interfaces {
 		curIf := current.Interface{}
 		curIp := current.IPConfig{}
-		curIp.Interface = &i
+		index := i
+		curIp.Interface = &index
 		curIf.Name = dev.Name
 		// 从 cm 中找到可用的 ip
 		ip, ipnet, err := net.ParseCIDR(dev.Range)
@@ -77,13 +77,11 @@ func (i *client) AssignIp(containerId string) (*current.Result, error) {
 			return nil, err
 		}
 
-		log.WriteString("select ip \n")
-		for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); inc(ip) {
+		for ip := getMin(ip, *ipnet); ipnet.Contains(ip); inc(ip) {
 			// 在 cm 中检查该 ip 是否被占用
 			_, ok := cnIpMap[ip.String()]
 			if !ok {
 				curIp.Address = net.IPNet{IP: ip, Mask: ipnet.Mask}
-				log.WriteString(fmt.Sprintf("ip: %v\n", ip))
 				break
 			}
 		}
@@ -108,14 +106,16 @@ func (i *client) AssignIp(containerId string) (*current.Result, error) {
 	}
 
 	// 返回 ip
-	log.WriteString("result in ipam client:\n")
-	if l, err := json.Marshal(result); err != nil {
-		log.WriteString(err.Error())
-	} else {
-		log.Write(l)
-		log.WriteString("\n")
-	}
 	return &result, nil
+}
+
+func getMin(ip net.IP, ipNet net.IPNet) net.IP {
+	i := ip.Mask(ipNet.Mask)
+	j := len(i) - 1
+	if i[j] == 0 {
+		i[j] ++
+	}
+	return i
 }
 
 func inc(ip net.IP) {
