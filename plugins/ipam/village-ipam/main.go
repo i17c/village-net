@@ -2,13 +2,13 @@ package main
 
 import (
 	"fmt"
+	"github.com/containernetworking/cni/pkg/version"
 	"github.com/containernetworking/plugins/pkg/types"
+	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
 
 	"encoding/json"
 	"github.com/containernetworking/cni/pkg/skel"
 	cnitypes "github.com/containernetworking/cni/pkg/types"
-	"github.com/containernetworking/cni/pkg/version"
-	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
 )
 
 func main() {
@@ -25,14 +25,14 @@ func cmdAdd(args *skel.CmdArgs) error {
 	// 初始化 Client
 	ipamClient, err := NewIPAMClient(conf)
 	if err != nil {
-		return err
+		return fmt.Errorf("init ipamClient error: %v", err)
 	}
 
 	// 获取 ip 并返回结果
 	r := &types.Result{}
 	r, err = ipamClient.AssignIp(args.ContainerID)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to assignIp: %v", err)
 	}
 
 	// Print result to stdout, in the format defined by the requested cniVersion.

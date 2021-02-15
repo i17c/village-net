@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"github.com/containernetworking/plugins/pkg/clients"
 	"github.com/containernetworking/plugins/pkg/types"
 	v1 "k8s.io/api/core/v1"
@@ -31,10 +32,10 @@ type ifConfigs []ifConfig
 
 type ifConfig struct {
 	Name        string `json:"name"`
-	Type        string `json:"type"`
-	Range       string `json:"range"`
-	GateWay     string `json:"gateway"`
-	IsDefaultGW bool   `json:"is_default_gw"`
+	Type        string `json:"type,omitempty"`
+	Range       string `json:"range,omitempty"`
+	GateWay     string `json:"gateway,omitempty"`
+	IsDefaultGW bool   `json:"is_default_gw,omitempty"`
 }
 
 func NewIPAMClient(conf types.NetConf) (Interface, error) {
@@ -49,17 +50,21 @@ func (i *client) AssignIp(containerId string) (*types.Result, error) {
 	// 从 apiserver 中读取 cm
 	cm, err := i.kubeClient.CoreV1().ConfigMaps(ipamConfigMapNamespace).Get(context.TODO(), ipamConfigMap, metav1.GetOptions{})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get cm: %v", err)
 	}
 
 	result := types.Result{}
 	interfaces := ifConfigs{}
 	if err := json.Unmarshal([]byte(cm.Data[ipamCMInterfaceKey]), &interfaces); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to marshal interfaces: %v", err)
 	}
 	cnIpMap := map[string]string{}
+	if _, ok := cm.Data[ipamCMContainerIpKey]; !ok {
+		d, _ := json.Marshal(cnIpMap)
+		cm.Data[ipamCMContainerIpKey] = string(d)
+	}
 	if err := json.Unmarshal([]byte(cm.Data[ipamCMContainerIpKey]), &cnIpMap); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to marshal containerIps: %v", err)
 	}
 	for _, dev := range interfaces {
 		curIf := types.Interface{}
@@ -89,10 +94,12 @@ func (i *client) AssignIp(containerId string) (*types.Result, error) {
 		curIp.Gateway = net.ParseIP(dev.GateWay)
 		curIf.IPs = append(curIf.IPs, &curIp)
 		result.IPs = append(result.IPs, &curIp)
-		result.Interfaces = append(result.Interfaces)
+		result.Interfaces = append(result.Interfaces, &curIf)
 
 		cnIpMap[curIp.Address.IP.String()] = containerId
 	}
+	d, _ := json.Marshal(cnIpMap)
+	cm.Data[ipamCMContainerIpKey] = string(d)
 
 	// 将上一步找到的 ip 与 containerId 绑定，写入到 cm 中
 	_, err = i.kubeClient.CoreV1().ConfigMaps(ipamConfigMapNamespace).Update(context.TODO(), cm, metav1.UpdateOptions{})

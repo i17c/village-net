@@ -1,9 +1,9 @@
 package types
 
+import "github.com/containernetworking/cni/pkg/types"
+
 type NetConf struct {
-	Name       string      `json:"name"`
-	CNIVersion string      `json:"cniVersion"`
-	IPAM       *IPAMConfig `json:"ipam"`
+	types.NetConf
 	Kubernetes Kubernetes  `json:"kubernetes"`
 
 	// macvlan config
