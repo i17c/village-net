@@ -122,7 +122,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 		}
 	}()
 
-	if len(mvIf.Interfaces) > 0 {
+	if len(mvIf.Interfaces) > 0 && conf.MacVlan != nil {
 		mvCtrl := macvlan.NewCtrl(args, conf, cniVersion, mvIf)
 		if err := mvCtrl.Add(); err != nil {
 			return err
