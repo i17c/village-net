@@ -6,10 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"github.com/containernetworking/plugins/pkg/node"
+	"github.com/coreos/go-systemd/activation"
 	"go.etcd.io/etcd/clientv3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+	"path/filepath"
 )
 
 type Controller struct {
@@ -32,8 +38,45 @@ func (c *Controller) Service() error {
 	return nil
 }
 
+func getListener(socketPath string) (net.Listener, error) {
+	l, err := activation.Listeners()
+	if err != nil {
+		return nil, err
+	}
+
+	switch {
+	case len(l) == 0:
+		if err := os.MkdirAll(filepath.Dir(socketPath), 0700); err != nil {
+			return nil, err
+		}
+		return net.Listen("unix", socketPath)
+
+	case len(l) == 1:
+		if l[0] == nil {
+			return nil, fmt.Errorf("LISTEN_FDS=1 but no FD found")
+		}
+		return l[0], nil
+
+	default:
+		return nil, fmt.Errorf("Too many (%v) FDs passed through socket activation", len(l))
+	}
+}
+
+func (c *Controller) runRPC(socketPath string) error {
+	l, err := getListener(socketPath)
+	if err != nil {
+		return fmt.Errorf("Error getting listener: %v", err)
+	}
+
+	ipPool := newIpPool()
+	rpc.Register(ipPool)
+	rpc.HandleHTTP()
+	http.Serve(l, nil)
+	return nil
+}
+
 func (c *Controller) SyncRoute() {
-	result, err := c.etcdCli.Get(context.TODO(), EtcdKeyNodeInfo)
+	result, err := c.etcdCli.Get(context.TODO(), EtcdKeyNodeInfo, clientv3.WithPrefix())
 	if err != nil {
 		klog.Errorf("query etcd failed: %s", err.Error())
 		return
@@ -50,7 +93,8 @@ func (c *Controller) SyncRoute() {
 		}
 	}
 
-	wc := c.etcdCli.Watch(context.Background(), EtcdKeyNodeInfo, clientv3.WithRev(result.Header.Revision))
+	ctx, canF := context.WithCancel(context.Background())
+	wc := c.etcdCli.Watch(ctx, EtcdKeyNodeInfo, clientv3.WithRev(result.Header.Revision))
 
 	klog.V(1).Info("start watch")
 	for {
@@ -68,6 +112,7 @@ func (c *Controller) SyncRoute() {
 			}
 		case <-c.stopCh:
 			klog.V(1).Info("route sync close")
+			canF()
 			return
 		}
 	}

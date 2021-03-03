@@ -43,6 +43,7 @@ type MacVlanConf struct {
 }
 
 type IPAMConfig struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	SocketPath string `json:"socket_path"`
 }
